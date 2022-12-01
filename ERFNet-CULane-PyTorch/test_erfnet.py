@@ -10,7 +10,6 @@ import cv2
 import utils.transforms as tf
 import numpy as np
 import models
-from models import sync_bn
 import dataset as ds
 from options.options import parser
 import torch.nn.functional as F
@@ -46,12 +45,12 @@ def main():
     input_mean = model.input_mean
     input_std = model.input_std
     policies = model.get_optim_policies()
-    model = torch.nn.DataParallel(model, device_ids=range(args.gpus)).cuda()
+    model = torch.nn.DataParallel(model, device_ids=range(args.gpus))
 
     if args.resume:
         if os.path.isfile(args.resume):
             print(("=> loading checkpoint '{}'".format(args.resume)))
-            checkpoint = torch.load(args.resume)
+            checkpoint = torch.load(args.resume, map_location='cpu')
             args.start_epoch = checkpoint['epoch']
             best_mIoU = checkpoint['best_mIoU']
             torch.nn.Module.load_state_dict(model, checkpoint['state_dict'])
@@ -64,18 +63,23 @@ def main():
     cudnn.fastest = True
 
     # Data loading code
-
-    test_loader = torch.utils.data.DataLoader(
-        getattr(ds, args.dataset.replace("CULane", "VOCAug") + 'DataSet')(data_list=args.val_list, transform=torchvision.transforms.Compose([
-            tf.GroupRandomScaleNew(size=(args.img_width, args.img_height), interpolation=(cv2.INTER_LINEAR, cv2.INTER_NEAREST)),
-            tf.GroupNormalize(mean=(input_mean, (0, )), std=(input_std, (1, ))),
-        ])), batch_size=args.batch_size, shuffle=False, num_workers=args.workers, pin_memory=False)
+    transforms = torchvision.transforms.Compose([
+        tf.GroupRandomScaleNew(size=(args.img_width, args.img_height), interpolation=(cv2.INTER_LINEAR, cv2.INTER_NEAREST)),
+        tf.GroupNormalize(mean=(input_mean, (0, )), std=(input_std, (1, ))),
+    ])
+    dataset_cls = getattr(ds, args.dataset.replace("CULane", "VOCAug") + 'DataSet')
+    dataset = dataset_cls(data_list=args.val_list, transform=transforms)
+    test_loader = torch.utils.data.DataLoader(dataset, 
+        batch_size=args.batch_size, 
+        shuffle=False, 
+        num_workers=args.workers, 
+        pin_memory=False)
 
     # define loss function (criterion) optimizer and evaluator
     weights = [1.0 for _ in range(5)]
     weights[0] = 0.4
-    class_weights = torch.FloatTensor(weights).cuda()
-    criterion = torch.nn.NLLLoss(ignore_index=ignore_label, weight=class_weights).cuda()
+    class_weights = torch.FloatTensor(weights)
+    criterion = torch.nn.NLLLoss(ignore_index=ignore_label, weight=class_weights)
     for group in policies:
         print(('group: {} has {} params, lr_mult: {}, decay_mult: {}'.format(group['name'], len(group['params']), group['lr_mult'], group['decay_mult'])))
     optimizer = torch.optim.SGD(policies, args.lr, momentum=args.momentum, weight_decay=args.weight_decay)
